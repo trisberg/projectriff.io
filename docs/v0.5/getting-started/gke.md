@@ -125,31 +125,19 @@ kubectl create clusterrolebinding cluster-admin-binding \
 --user=$(gcloud config get-value core/account)
 ```
 
-## Install the Helm CLI
+## Install the kapp CLI
 
-[Helm](https://helm.sh) is a popular package manager for Kubernetes. The riff runtime and its dependencies are provided as Helm charts.
+The [kapp](https://get-kapp.io/) utility is a simple deployment tool focused on the concept of a "Kubernetes application".
 
-Download a recent release of the [Helm v2 CLI](https://github.com/helm/helm/releases/) for your platform.
-(Download version 2.13 or later, Helm v3 is currently pre-release and has not been tested for compatibility with riff).
-Unzip and copy the Helm CLI executable to a directory on your path.
+Via Homebrew (OS X or Linux)
+Based on github.com/k14s/homebrew-tap
 
-Initialize the Helm Tiller server in your cluster.
 ```sh
-kubectl create serviceaccount tiller -n kube-system
-kubectl create clusterrolebinding tiller --clusterrole cluster-admin --serviceaccount kube-system:tiller
-helm init --wait --service-account tiller
+brew tap k14s/tap
+brew install kapp
 ```
 
-Validate the installation.
-```sh
-helm version
-```
-```
-Client: &version.Version{SemVer:"v2.16.0", GitCommit:"618447cbf203d147601b4b9bd7f8c37a5d39fbb4", GitTreeState:"clean"}
-Server: &version.Version{SemVer:"v2.16.0", GitCommit:"618447cbf203d147601b4b9bd7f8c37a5d39fbb4", GitTreeState:"clean"}
-```
-
-> Please see the [Helm documentation](https://helm.sh/docs/using_helm/#securing-your-helm-installation) for additional Helm security configuration.
+See [k14s Install](https://k14s.io/#install-from-github-release) page for more details.
 
 ## Install a snapshot build of the riff CLI
 
@@ -165,34 +153,62 @@ riff --version
 riff version 0.5.0-snapshot (443fc9125dd6d8eecd1f7e1a13fa93b88fd4f972)
 ```
 
-## Install riff using Helm
+## Install riff using kapp
 
-Load the projectriff charts
+Set the version to be installed:
 
 ```sh
-helm repo add projectriff https://projectriff.storage.googleapis.com/charts/releases
-helm repo update
+export riff_version=0.5.0-snapshot
 ```
 
-riff can be installed with optional runtimes. The riff build system is always installed, and is required by each runtime.
-
-If using the Knative runtime, first install Istio:
+First we need to create the namespace for `kapp`.
 
 ```sh
-helm install projectriff/istio --name istio --namespace istio-system --wait --devel
+kubectl create ns apps
 ```
 
-Install riff with both the Core and Knative runtimes. To omit or include other runtimes, edit the relevant lines below.
+Next, we install `cert-manager` and `kpack`.
 
 ```sh
-helm install projectriff/riff --name riff \
-  --set tags.core-runtime=true \
-  --set tags.knative-runtime=true \
-  --set tags.streaming-runtime=false \
-  --wait --devel
+kapp deploy -y -n apps -a cert-manager -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/cert-manager.yaml
+kapp deploy -y -n apps -a kpack -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/kpack.yaml
+```
+
+Now, we can install the riff build system. There are optional runtimes for riff that can be installed after the build system is installed.
+
+```sh
+kapp deploy -y -n apps -a riff-builders -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/riff-builders.yaml
+kapp deploy -y -n apps -a riff-build -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/riff-build.yaml
+```
+
+When installing the Knative runtime we need to first install Istio:
+
+```sh
+kapp deploy -y -n apps -a istio -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/istio.yaml
+```
+
+Then we can install Knative and the Knative runtime:
+
+```sh
+kapp deploy -y -n apps -a knative -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/knative.yaml
+kapp deploy -y -n apps -a riff-knative-runtime -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/riff-knative-runtime.yaml
+
+```
+
+Finally we install keda, kafka and the streaming runtime
+
+```sh
+kapp deploy -y -n apps -a keda -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/keda.yaml
+kapp deploy -y -n apps -a riff-streaming-runtime -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/riff-streaming-runtime.yaml
 ```
 
 > NOTE: After installing the Streaming runtime, configure Kafka with a [KafkaProvider](/docs/v0.5/runtimes/streaming#kafkaprovider).
+
+To install a single node Kafka you can use this:
+
+```sh
+kapp deploy -y -n apps -a kafka -f https://storage.googleapis.com/projectriff/charts/uncharted/${riff_version}/kafka.yaml
+```
 
 Verify the riff install. Resources may be missing if the corresponding runtime was not installed.
 
@@ -202,6 +218,7 @@ riff doctor
 
 ```
 NAMESPACE     STATUS
+default       ok
 riff-system   ok
 
 RESOURCE                              READ      WRITE
@@ -314,53 +331,9 @@ curl http://$INGRESS_IP/ -w '\n' \
 49
 ```
 
-## Create a Core deployer
-
-The [Core runtime](../runtimes/core.md) deploys riff workloads as "vanilla" Kubernetes deployments and services.
-
-```sh
-riff core deployer create k8s-square --function-ref square --tail
-```
-
-After the deployer is created, you can see the service name by listing deployers.
-
-```sh
-riff core deployers list
-```
-```
-NAME         TYPE       REF      URL                                           STATUS   AGE
-k8s-square   function   square   http://k8s-square.default.svc.cluster.local   Ready    35s
-```
-
-### invoke the function
-
-In a separate terminal, start port-forwarding to the ClusterIP service created by the deployer.
-
-```sh
-kubectl port-forward service/k8s-square 8080:80
-```
-```
-Forwarding from 127.0.0.1:8080 -> 8080
-Forwarding from [::1]:8080 -> 8080
-```
-
-Make a POST request to invoke the function using the port assigned above.
-
-```sh
-curl http://localhost:8080/ -w '\n' \
--H 'Content-Type: application/json' \
--d 8
-```
-```
-64
-```
-
-Note that unlike Knative, the Core runtime will not scale deployments down to zero.
-
 ## Cleanup
 
 ```sh
 riff knative deployer delete knative-square
-riff core deployer delete k8s-square
 riff function delete square
 ```
